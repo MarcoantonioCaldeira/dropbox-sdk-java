@@ -1,0 +1,19 @@
+plugins {
+    id("kotlin")
+    alias(dropboxJavaSdkLibs.plugins.kotlinx.serialization)
+}
+
+description = 'Kotlin Codegen'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+dependencies {
+    implementation(dropboxJavaSdkLibs.kotlinpoet)
+    implementation(dropboxJavaSdkLibs.kotlinx.serialization.core)
+    implementation(dropboxJavaSdkLibs.kotlinx.serialization.json)
+
+    testImplementation(dropboxJavaSdkLibs.test.junit)
+}

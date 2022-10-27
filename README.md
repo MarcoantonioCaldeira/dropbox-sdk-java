@@ -5,7 +5,7 @@
 ![GitHub Release Date](https://img.shields.io/github/release-date/dropbox/dropbox-sdk-java)
 
 A Java library to access [Dropbox's HTTP-based Core API v2](https://www.dropbox.com/developers/documentation/http/documentation).  This SDK also supports the older [Core API v1](https://www.dropbox.com/developers-v1/core/docs), but that support will be removed at some point.
-
+__
 License: [MIT](License.txt)
 
 Documentation: [Javadocs](https://dropbox.github.io/dropbox-sdk-java/api-docs/v5.4.3/)

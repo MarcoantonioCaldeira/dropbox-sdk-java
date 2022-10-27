@@ -25,6 +25,7 @@ from stone.ir import (
     DataType,
     Field,
     Int32,
+    List,
     is_boolean_type,
     is_bytes_type,
     is_composite_type,
@@ -49,14 +50,17 @@ from stone.ir import (
 from stone.backend import CodeBackend
 from stone.frontend.ir_generator import parse_data_types_from_doc_ref
 
+
 @six.add_metaclass(abc.ABCMeta)
 class StoneType:
     pass
+
 
 StoneType.register(ApiNamespace)
 StoneType.register(ApiRoute)
 StoneType.register(DataType)
 StoneType.register(Field)
+
 
 def cached(f):
     cache = {}
@@ -73,10 +77,23 @@ def cached(f):
 
     return wrapper
 
+
+def is_enum(data_type):
+    if data_type is None:
+        return False
+
+    assert isinstance(data_type, DataType), repr(data_type)
+    if is_union_type(data_type):
+        return all(is_void_type(f.data_type) for f in data_type.all_fields)
+    else:
+        return False
+
+
 class cached_property(object):
     """
     Decorator similar to @property, but which caches the results permanently.
     """
+
     def __init__(self, func):
         self._func = func
         self._attr_name = func.__name__
@@ -164,6 +181,8 @@ _JAVADOC_REPLACEMENT_CHARS = (
     ('<', '&lt;'),
     ('>', '&gt;'),
 )
+
+
 def sanitize_javadoc(doc):
     # sanitize &, <, > characters
     for char, code in _JAVADOC_REPLACEMENT_CHARS:
@@ -280,6 +299,7 @@ def get_enumerated_subtypes_recursively(data_type):
         return []
 
     subtypes = []
+
     def add_subtype(data_type):
         subtypes.append(data_type)
         if data_type.has_enumerated_subtypes():
@@ -370,7 +390,7 @@ class JavaClass(object):
             if is_last or is_class_name:
                 self._package = '.'.join(package_parts[:i])
                 self._static_name = '.'.join(package_parts[i:])
-                self._import_name = '.'.join(package_parts[:i+1])
+                self._import_name = '.'.join(package_parts[:i + 1])
                 break
 
     @classmethod
@@ -585,12 +605,12 @@ class Visibility(object):
         assert isinstance(other, type(self)), repr(other)
         return self._rank < other._rank
 
+
 Visibility.NONE = Visibility(0, 'NONE', None)
 Visibility.PRIVATE = Visibility(1, 'PRIVATE', 'private')
 Visibility.PACKAGE = Visibility(2, 'PACKAGE', '')
 Visibility.PUBLIC = Visibility(3, 'PUBLIC', 'public')
 Visibility._VALUES = (Visibility.NONE, Visibility.PRIVATE, Visibility.PACKAGE, Visibility.PUBLIC)
-
 
 _CMDLINE_PARSER = argparse.ArgumentParser(prog='java-generator')
 _CMDLINE_PARSER.add_argument('--package', type=six.text_type, required=True,
@@ -607,22 +627,59 @@ _CMDLINE_PARSER.add_argument('--data-types-only', action="store_true", default=F
                              help='Generate all data types but no routes or clients.')
 _CMDLINE_PARSER.add_argument('--javadoc-refs', type=six.text_type, default=None,
                              help='Path to Javadoc references file. If a file exists at this ' +
-                             'path, it will be loaded and used for generating correct Javadoc ' +
-                             'references based off previous generator runs. This is useful when ' +
-                             'generating multiple clients for a single project. ' +
-                             'If this argument is specified, an update Javadoc references file ' +
-                             'will be saved to the given location. It is OK if this file does not ' +
-                             'exist.')
+                                  'path, it will be loaded and used for generating correct Javadoc ' +
+                                  'references based off previous generator runs. This is useful when ' +
+                                  'generating multiple clients for a single project. ' +
+                                  'If this argument is specified, an update Javadoc references file ' +
+                                  'will be saved to the given location. It is OK if this file does not ' +
+                                  'exist.')
 _CMDLINE_PARSER.add_argument('--unused-classes-to-generate', default=None, help='Specify types ' +
-                             'that we want to generate regardless of whether they are used.')
+                                                                                'that we want to generate regardless of whether they are used.')
+
 
 class JavaCodeGenerator(CodeBackend):
     cmdline_parser = _CMDLINE_PARSER
 
+    def what_type_info(self, data_type):
+        if data_type is None:
+            return None
+
+        type_info = {
+            "name": data_type.name,
+            "is_struct_type": is_struct_type(data_type),
+            "is_primitive_type": is_primitive_type(data_type),
+            "is_boolean_type": is_boolean_type(data_type),
+            "is_numeric_type": is_numeric_type(data_type),
+            "is_list_type": is_list_type(data_type),
+            "is_union_type": is_union_type(data_type),
+            "is_bytes_type": is_bytes_type(data_type),
+            "is_map_type": is_map_type(data_type),
+            "is_composite_type": is_composite_type(data_type),
+            "is_nullable_type": is_nullable_type(data_type),
+            "is_string_type": is_string_type(data_type),
+            "is_void_type": is_void_type(data_type),
+            "is_timestamp_type": is_timestamp_type(data_type),
+        }
+
+        if is_struct_type(data_type):
+            type_info["namespace"] = data_type.namespace.name
+            type_info["parent_type_data"] = self.what_type_info(data_type.parent_type)
+        if is_union_type(data_type):
+            type_info["namespace"] = data_type.namespace.name
+        if is_nullable_type(data_type):
+            type_info["nullable_type_data"] = self.what_type_info(data_type.data_type)
+        if is_union_type(data_type):
+            type_info["parent_type_data"] = self.what_type_info(data_type.parent_type)
+        if is_list_type(data_type):
+            type_info["list_item_type_data"] = self.what_type_info(data_type.data_type)
+            type_info["min_items"] = data_type.min_items
+            type_info["max_items"] = data_type.max_items
+
+        return type_info
+
     def generate(self, api):
         """
         Toplevel code generation method.
-
         This is called by stone.cli.
         """
         generator = JavaCodeGenerationInstance(self, api)
@@ -631,6 +688,56 @@ class JavaCodeGenerator(CodeBackend):
             generator.generate_data_types()
         else:
             generator.generate_all()
+
+        # Custom New Stuff
+        for namespace in api.namespaces.values():
+            namespace_data = {
+                "name": namespace.name,
+                "doc": namespace.doc,
+                "routes": [],
+                "types": []
+            }
+            for data_type in namespace.linearize_data_types():
+                type_data = {
+                    "name": data_type.name,
+                    "doc": data_type.doc,
+                    "type_info": self.what_type_info(data_type),
+                    "fields": [],
+                }
+
+                type_data["examples"] = []
+                for example in data_type.get_examples().values():
+                    type_data["examples"].append({
+                        "text": example.text,
+                        "label": example.label,
+                        "value": example.value,
+                    })
+
+                for field in data_type.all_fields:
+                    if field.name is not "other":
+                        field_data = {
+                            "name": field.name,
+                            "doc": field.doc,
+                            "type_info": self.what_type_info(field.data_type),
+                            "deprecated": field.deprecated,
+                            "preview": field.preview,
+                        }
+
+                        type_data["fields"].append(field_data)
+
+                namespace_data["types"].append(type_data)
+
+            for route in namespace.routes:
+                namespace_data["route_count"] = len(namespace.routes)
+                namespace_data["routes"].append({
+                    "name": route.name,
+                    "doc": route.doc,
+                    "version": route.version,
+                    "path": "/" + str(route.version) + "/" + namespace.name + "/" + route.name
+                })
+
+            with open('kotlin/build/' + namespace.name + '.json', 'w') as f:
+                f.write(json.dumps(namespace_data, indent=2))
 
 
 class JavaImporter(object):
@@ -805,7 +912,7 @@ class JavaImporter(object):
         j = self._j
 
         # for hash code computation
-        if data_type.fields or (is_union_type(data_type) and not j.is_enum(data_type)):
+        if data_type.fields or (is_union_type(data_type) and not is_enum(data_type)):
             self.add_imports('java.util.Arrays')
 
         self._add_imports_for_data_type(data_type)
@@ -970,7 +1077,7 @@ class JavaClassWriter(object):
 
         if isinstance(element, DataType):
             data_type = element
-            if j.is_enum(data_type):
+            if is_enum(data_type):
                 class_type = 'enum'
             elif is_union_type(data_type):
                 modifiers.append('final')
@@ -1041,8 +1148,8 @@ class JavaClassWriter(object):
 
         needs_newline = bool(project_imports)
         for _, imports in chain(sorted(grouped.items()), [
-                ('java', java_imports),
-                ('javax', javax_imports)
+            ('java', java_imports),
+            ('javax', javax_imports)
         ]):
             if imports:
                 if needs_newline:
@@ -1066,9 +1173,9 @@ class JavaClassWriter(object):
         elif data_type.name == 'String':
             return self.fmt('"%s"', stone_value.replace('\\', '\\\\').replace('"', '\\"'))
         elif data_type.name == 'Float32':
-            return repr(stone_value) + 'f' # append a f at the end for float value
+            return repr(stone_value) + 'f'  # append a f at the end for float value
         elif data_type.name == 'Float64':
-            return repr(stone_value) # Because str() drops the last few digits.
+            return repr(stone_value)  # Because str() drops the last few digits.
         elif data_type.name in ('Int64', 'UInt64', 'UInt32'):
             return str(stone_value) + 'L'  # Need exact type match for boxed values.
         elif is_union_type(data_type):
@@ -1271,10 +1378,10 @@ class JavaClassWriter(object):
                 self._g.emit_wrapped_text(paragraph, initial_prefix=prefix, subsequent_prefix=prefix)
 
         emit_attrs('@param', params)
-        emit_attrs('@return', { "": returns } if returns else None)
+        emit_attrs('@return', {"": returns} if returns else None)
         emit_attrs('@throws', throws)
         # deprecated can be empty string, which still means we should emit
-        emit_attrs('@deprecated', { "": deprecated } if deprecated is not None else None)
+        emit_attrs('@deprecated', {"": deprecated} if deprecated is not None else None)
 
         self.out(' */')
         # compiler requires a separate annotation outside the javadoc to display warnings about
@@ -1352,6 +1459,7 @@ class JavaClassWriter(object):
             data_type = data_type.data_type
 
         requirements = []
+
         def add_req(precondition, failure_reason):
             if as_failure_reasons:
                 requirements.append(failure_reason)
@@ -1446,7 +1554,7 @@ class JavaClassWriter(object):
                 if stone_elem and None in parts:
                     context_parts = j.stone_fq_name(stone_elem).split('.')
                     # pad the end with None's
-                    context_parts += [None,] * (max_parts - len(context_parts))
+                    context_parts += [None, ] * (max_parts - len(context_parts))
                     parts = [(orig or context) for orig, context in zip(parts, context_parts)]
                 if None in parts:
                     return None
@@ -1758,7 +1866,7 @@ class JavaApi(object):
 
     def get_spec_filenames(self, element):
         assert isinstance(element, StoneType), repr(element)
-        filenames = OrderedDict() # ordered set
+        filenames = OrderedDict()  # ordered set
         if isinstance(element, ApiNamespace):
             for child in chain(element.data_types, element.routes):
                 filenames[self.get_spec_filename(child)] = None
@@ -1841,7 +1949,7 @@ class JavaApi(object):
     def field_enum_name(self, field):
         assert isinstance(field, Field), repr(field)
         containing_data_type = self._containing_data_types[field]
-        if self.is_enum(containing_data_type):
+        if is_enum(containing_data_type):
             return allcaps(field.name)
         return None
 
@@ -1862,7 +1970,7 @@ class JavaApi(object):
         assert isinstance(field, Field), repr(field)
         containing_data_type = self._containing_data_types[field]
         if is_union_type(containing_data_type):
-            if self.is_enum(containing_data_type):
+            if is_enum(containing_data_type):
                 return self.field_enum_name(field)
             elif not self.has_value(field):
                 return allcaps(field.name)
@@ -1885,14 +1993,6 @@ class JavaApi(object):
 
     def is_java_primitive(self, data_type):
         return self.java_class(data_type, generics=False).name[0].islower()
-
-    @staticmethod
-    def is_enum(data_type):
-        assert isinstance(data_type, DataType), repr(data_type)
-        if is_union_type(data_type):
-            return all(is_void_type(f.data_type) for f in data_type.all_fields)
-        else:
-            return False
 
     @staticmethod
     def has_value(field):
@@ -2391,7 +2491,7 @@ class RouteReference(JavaClassReference):
 
         if is_struct_type(route.arg_data_type):
             self.is_method_overloaded = (
-                any(route.arg_data_type.all_optional_fields) and not j.has_builder(route.arg_data_type)
+                    any(route.arg_data_type.all_optional_fields) and not j.has_builder(route.arg_data_type)
             )
             if self.is_method_overloaded:
                 fields = route.arg_data_type.all_fields
@@ -2476,7 +2576,8 @@ class JavaCodeGenerationInstance(object):
             java_class = self.j.java_class(stone_type_or_class)
             stone_element = stone_type_or_class
 
-        with JavaClassWriter(self.g, self.j, self.refs, java_class, stone_element=stone_element, package_doc=package_doc) as w:
+        with JavaClassWriter(self.g, self.j, self.refs, java_class, stone_element=stone_element,
+                             package_doc=package_doc) as w:
             assert self.w is None, self.w
             self.w = w
             yield w
@@ -2663,7 +2764,8 @@ class JavaCodeGenerationInstance(object):
                     # we don't use builders if we have too few optional fields. Instead we just
                     # create another method call. We have an exception for download endpoints, which
                     # recently added builders for previous routes that had no builders
-                    has_optional_fields = is_struct_type(route.arg_data_type) and route.arg_data_type.all_optional_fields
+                    has_optional_fields = is_struct_type(
+                        route.arg_data_type) and route.arg_data_type.all_optional_fields
                     if has_optional_fields and not j.has_builder(route.arg_data_type):
                         self.generate_route(route, required_only=False)
 
@@ -2693,11 +2795,11 @@ class JavaCodeGenerationInstance(object):
             )
 
         package_doc = (
-            """
-            %s
-
-            %s
-            """ % (namespace.doc or '', requests_reference_doc)
+                """
+                %s
+    
+                %s
+                """ % (namespace.doc or '', requests_reference_doc)
         )
 
         package_info_class = JavaClass(j.java_class(namespace).package + '.' + 'package-info')
@@ -2729,11 +2831,11 @@ class JavaCodeGenerationInstance(object):
             return_class = JavaClass('void')
 
         if is_public:
-            deprecated = None # automatically determine from route
+            deprecated = None  # automatically determine from route
             visibility = 'public'
         else:
-            deprecated = False # Don't mark private methods deprecated since we don't care
-            visibility = ''    # package private
+            deprecated = False  # Don't mark private methods deprecated since we don't care
+            visibility = ''  # package private
 
         throws_classes = j.route_throws_classes(route)
         throws = ', '.join(w.resolved_class(c) for c in throws_classes)
@@ -2808,7 +2910,6 @@ class JavaCodeGenerationInstance(object):
             # you want to support this.
             assert n_optional == 1, "More than one optional field should permit boxing! %s" % repr(route)
 
-
         if j.request_style(route) == 'upload':
             returns = "Uploader used to upload the request body and finish request."
             return_class = j.route_uploader_class(route)
@@ -2819,7 +2920,7 @@ class JavaCodeGenerationInstance(object):
             returns = result
             return_class = j.java_class(route.result_data_type)
         else:
-            returns=None
+            returns = None
             return_class = JavaClass('void')
 
         if required_only:
@@ -2901,11 +3002,11 @@ class JavaCodeGenerationInstance(object):
         return_class = j.builder_class(route)
 
         if j.request_style(route) == 'upload':
-            returns="Uploader builder for configuring request parameters and instantiating an uploader."
+            returns = "Uploader builder for configuring request parameters and instantiating an uploader."
         elif j.request_style(route) == 'download':
-            returns="Downloader builder for configuring the request parameters and instantiating a downloader."
+            returns = "Downloader builder for configuring the request parameters and instantiating a downloader."
         else:
-            returns="Request builder for configuring request parameters and completing the request."
+            returns = "Request builder for configuring request parameters and completing the request."
 
         required_fields = arg.all_required_fields
         args = ', '.join(
@@ -2922,7 +3023,7 @@ class JavaCodeGenerationInstance(object):
                       j.builder_class(arg),
                       j.java_class(arg),
                       builder_args,
-                )
+                      )
                 w.out('return new %s(this, argBuilder_);', return_class)
             else:
                 w.out('return new %s(this, %s);', return_class, builder_args)
@@ -3038,7 +3139,7 @@ class JavaCodeGenerationInstance(object):
             w.importer.add_imports_for_data_type(data_type)
             w.write_imports()
 
-            if j.is_enum(data_type):
+            if is_enum(data_type):
                 self.generate_data_type_enum(data_type)
             elif is_union_type(data_type):
                 self.generate_data_type_union(data_type)
@@ -3057,7 +3158,7 @@ class JavaCodeGenerationInstance(object):
         w = self.w
         j = self.j
 
-        assert j.is_enum(data_type), repr(data_type)
+        assert is_enum(data_type), repr(data_type)
 
         visibility = j.data_type_visibility(data_type)
 
@@ -3107,12 +3208,11 @@ class JavaCodeGenerationInstance(object):
             true}. You can use {@link #tag()} to determine the tag associated with this instance.
             """ % (data_type.doc or '', 'an open tagged' if data_type.catch_all_field else 'a tagged')
         if data_type.catch_all_field:
-                class_doc += """
+            class_doc += """
 
                 Open unions may be extended in the future with additional tags. If a new tag is
                 introduced that this SDK does not recognized, the {@link #%s} value will be used.
                 """ % j.field_static_instance(data_type.catch_all_field)
-
 
         visibility = j.data_type_visibility(data_type)
 
@@ -3148,7 +3248,7 @@ class JavaCodeGenerationInstance(object):
                       j.java_class(data_type),
                       method_name,
                       singleton_args,
-                )
+                      )
 
             #
             # Instance fields
@@ -3200,10 +3300,10 @@ class JavaCodeGenerationInstance(object):
             w.out('')
             if data_type.catch_all_field:
                 catch_all_doc = (
-                    """
-                    If a tag returned by the server is unrecognized by this SDK,
-                    the {@link Tag#%s} value will be used.
-                    """ % j.field_tag_enum_name(data_type.catch_all_field)
+                        """
+                        If a tag returned by the server is unrecognized by this SDK,
+                        the {@link Tag#%s} value will be used.
+                        """ % j.field_tag_enum_name(data_type.catch_all_field)
                 )
             else:
                 catch_all_doc = ""
@@ -3255,11 +3355,11 @@ class JavaCodeGenerationInstance(object):
                 otherwise.
                 """ % j.field_tag_enum_name(field),
                 returns=(
-                    """
-                    {@code true} if this instance is tagged as {@link Tag#%s},
-                    {@code false} otherwise.
-                    """
-                ) % j.field_tag_enum_name(field)
+                            """
+                            {@code true} if this instance is tagged as {@link Tag#%s},
+                            {@code false} otherwise.
+                            """
+                        ) % j.field_tag_enum_name(field)
             )
             with w.block('public boolean %s()' % j.field_tag_match_method_name(field)):
                 w.out('return this._tag == Tag.%s;', j.field_tag_enum_name(field))
@@ -3270,11 +3370,11 @@ class JavaCodeGenerationInstance(object):
                 #
                 w.out('')
                 doc = (
-                    """
-                    Returns an instance of {@code %s} that has its tag set to {@link Tag#%s}.
-
-                    %s
-                    """ % (j.java_class(data_type).name, j.field_tag_enum_name(field), field.doc)
+                        """
+                        Returns an instance of {@code %s} that has its tag set to {@link Tag#%s}.
+    
+                        %s
+                        """ % (j.java_class(data_type).name, j.field_tag_enum_name(field), field.doc)
                 )
                 returns = "Instance of {@code %s} with its tag set to {@link Tag#%s}." % (
                     j.java_class(data_type).name, j.field_tag_enum_name(field))
@@ -3290,8 +3390,9 @@ class JavaCodeGenerationInstance(object):
                                  j.java_class(data_type),
                                  j.field_factory_method(field),
                                  j.java_class(field),
-                    ):
-                        self.generate_field_validation(field, value_name="value", omit_arg_name=True, allow_default=False)
+                                 ):
+                        self.generate_field_validation(field, value_name="value", omit_arg_name=True,
+                                                       allow_default=False)
                         method_name = union_create_with_method_name(data_type, [field])
                         w.out('return new %s().%s(Tag.%s, %s);',
                               j.java_class(data_type),
@@ -3326,9 +3427,10 @@ class JavaCodeGenerationInstance(object):
                 )
                 with w.block('public %s %s()', j.java_class(field), j.field_getter_method(field)):
                     with w.block('if (this._tag != Tag.%s)', j.field_tag_enum_name(field)):
-                        w.out('throw new IllegalStateException("Invalid tag: required Tag.%s, but was Tag." + this._tag.name());', j.field_tag_enum_name(field))
+                        w.out(
+                            'throw new IllegalStateException("Invalid tag: required Tag.%s, but was Tag." + this._tag.name());',
+                            j.field_tag_enum_name(field))
                     w.out('return %s;', j.param_name(field))
-
 
     def generate_data_type_struct(self, data_type):
         assert is_struct_type(data_type), repr(data_type)
@@ -3426,7 +3528,6 @@ class JavaCodeGenerationInstance(object):
                 w.javadoc(field.doc or '', stone_elem=field, returns=returns)
                 with w.block('public %s %s()', j.java_class(field), j.field_getter_method(field)):
                     w.out('return %s;' % j.param_name(field))
-
 
             #
             # builder
@@ -3570,7 +3671,6 @@ class JavaCodeGenerationInstance(object):
                 If left unset or set to {@code null}, defaults to {@code %s}.
                 """ % w.java_default_value(field)
 
-
             #
             # withFieldName(FieldType fieldValue);
             #
@@ -3579,7 +3679,7 @@ class JavaCodeGenerationInstance(object):
             with w.block('public %s %s(%s %s)',
                          builder_class,
                          j.field_builder_method(field),
-                         j.java_class(field, boxed=True), # null treated as default
+                         j.java_class(field, boxed=True),  # null treated as default
                          j.param_name(field)):
                 if wrapped_builder_name:
                     w.out('%s.%s(%s);',
@@ -3674,7 +3774,8 @@ class JavaCodeGenerationInstance(object):
                     params=(('httpUploader', 'Initiated HTTP upload request'),),
                     throws=(('NullPointerException', 'if {@code httpUploader} is {@code null}'),)
                 )
-                with w.block('public %s(HttpRequestor.Uploader httpUploader, String userId)', j.route_uploader_class(route)):
+                with w.block('public %s(HttpRequestor.Uploader httpUploader, String userId)',
+                             j.route_uploader_class(route)):
                     w.out('super(httpUploader, %s, %s, userId);',
                           w.java_serializer(route.result_data_type),
                           w.java_serializer(route.error_data_type))
@@ -3737,8 +3838,9 @@ class JavaCodeGenerationInstance(object):
                 # CONSTRUCTOR
                 #
 
-                params=[
-                    ('_client', 'Dropbox namespace-specific client used to issue %s requests.' % j.route_namespace(route).name)
+                params = [
+                    ('_client',
+                     'Dropbox namespace-specific client used to issue %s requests.' % j.route_namespace(route).name)
                 ]
                 if j.has_builder(arg):
                     fields = ()
@@ -3783,7 +3885,8 @@ class JavaCodeGenerationInstance(object):
                 #
 
                 wrapped_builder_name = '_builder' if j.has_builder(arg) else None
-                self.generate_builder_methods(j.builder_class(route), arg.all_fields, wrapped_builder_name=wrapped_builder_name)
+                self.generate_builder_methods(j.builder_class(route), arg.all_fields,
+                                              wrapped_builder_name=wrapped_builder_name)
 
                 #
                 # BUILD method to start request
@@ -3928,7 +4031,9 @@ class JavaCodeGenerationInstance(object):
 
         w.out('')
         w.out('@Override')
-        with w.block('public void serialize(%s value, JsonGenerator g, boolean collapse) throws IOException, JsonGenerationException', j.java_class(data_type)):
+        with w.block(
+                'public void serialize(%s value, JsonGenerator g, boolean collapse) throws IOException, JsonGenerationException',
+                j.java_class(data_type)):
 
             if data_type.has_enumerated_subtypes():
                 for subtype in data_type.get_enumerated_subtypes():
@@ -3965,7 +4070,8 @@ class JavaCodeGenerationInstance(object):
 
         w.out('')
         w.out('@Override')
-        with w.block('public %s deserialize(JsonParser p, boolean collapsed) throws IOException, JsonParseException', j.java_class(data_type)):
+        with w.block('public %s deserialize(JsonParser p, boolean collapsed) throws IOException, JsonParseException',
+                     j.java_class(data_type)):
             w.out('%s value;', j.java_class(data_type))
             w.out('String tag = null;')
 
@@ -4000,7 +4106,7 @@ class JavaCodeGenerationInstance(object):
                 for field in data_type.all_fields:
                     if field not in data_type.all_optional_fields:
                         with w.block('if (f_%s == null)', j.param_name(field)):
-                            w.out('throw new JsonParseException(p, "Required field \\"%s\\" missing.");' , field.name)
+                            w.out('throw new JsonParseException(p, "Required field \\"%s\\" missing.");', field.name)
                 args = ['f_%s' % j.param_name(f) for f in data_type.all_fields]
                 w.out('value = new %s(%s);', j.java_class(data_type), ', '.join(args))
 
@@ -4025,8 +4131,9 @@ class JavaCodeGenerationInstance(object):
 
         w.out('')
         w.out('@Override')
-        with w.block('public void serialize(%s value, JsonGenerator g) throws IOException, JsonGenerationException', j.java_class(data_type)):
-            tag = 'value' if j.is_enum(data_type) else 'value.tag()'
+        with w.block('public void serialize(%s value, JsonGenerator g) throws IOException, JsonGenerationException',
+                     j.java_class(data_type)):
+            tag = 'value' if is_enum(data_type) else 'value.tag()'
             with w.block('switch (%s)' % tag):
                 for field in data_type.all_fields:
                     if field == data_type.catch_all_field:
@@ -4039,7 +4146,8 @@ class JavaCodeGenerationInstance(object):
                             w.out('writeTag("%s", g);', field.name)
                             serializer = w.java_serializer(field.data_type)
                             value = 'value.%s' % j.param_name(field)
-                            if j.is_collapsible(field.data_type) or is_nullable_type(field.data_type) and j.is_collapsible(field.data_type.data_type):
+                            if j.is_collapsible(field.data_type) or is_nullable_type(
+                                    field.data_type) and j.is_collapsible(field.data_type.data_type):
                                 w.out('%s.serialize(%s, g, true);', serializer, value)
                             else:
                                 w.out('g.writeFieldName("%s");', field.name)
@@ -4061,7 +4169,8 @@ class JavaCodeGenerationInstance(object):
 
         w.out('')
         w.out('@Override')
-        with w.block('public %s deserialize(JsonParser p) throws IOException, JsonParseException', j.java_class(data_type)):
+        with w.block('public %s deserialize(JsonParser p) throws IOException, JsonParseException',
+                     j.java_class(data_type)):
             w.out('%s value;', j.java_class(data_type))
             w.out('boolean collapsed;')
             w.out('String tag;')
@@ -4088,9 +4197,11 @@ class JavaCodeGenerationInstance(object):
                         w.out('value = %s.%s;', j.java_class(data_type), j.field_static_instance(field))
                     else:
                         w.out('%s fieldValue = null;', j.java_class(field_dt, boxed=True, generics=True))
-                        with w.conditional_block(is_nullable_type(field.data_type), 'if (p.getCurrentToken() != JsonToken.END_OBJECT)'):
+                        with w.conditional_block(is_nullable_type(field.data_type),
+                                                 'if (p.getCurrentToken() != JsonToken.END_OBJECT)'):
                             field_serializer = w.java_serializer(field_dt)
-                            if j.is_collapsible(field_dt) or is_nullable_type(field_dt) and j.is_collapsible(field_dt.data_type):
+                            if j.is_collapsible(field_dt) or is_nullable_type(field_dt) and j.is_collapsible(
+                                    field_dt.data_type):
                                 w.out('fieldValue = %s.deserialize(p, true);', field_serializer)
                             else:
                                 w.out('expectField("%s", p);', field.name)
@@ -4100,7 +4211,8 @@ class JavaCodeGenerationInstance(object):
                             with w.block('if (fieldValue == null)'):
                                 w.out('value = %s.%s();', j.java_class(data_type), j.field_factory_method(field))
                             with w.block('else'):
-                                w.out('value = %s.%s(fieldValue);', j.java_class(data_type), j.field_factory_method(field))
+                                w.out('value = %s.%s(fieldValue);', j.java_class(data_type),
+                                      j.field_factory_method(field))
                         else:
                             w.out('value = %s.%s(fieldValue);', j.java_class(data_type), j.field_factory_method(field))
             with w.block('else'):
@@ -4142,7 +4254,8 @@ class JavaCodeGenerationInstance(object):
             with w.block('for (%s %s : %s)', list_item_type, xn, value_name):
                 with w.block('if (%s == null)', xn):
                     w.out('throw new IllegalArgumentException("An item in list%s is null");', description)
-                self.generate_data_type_validation(data_type.data_type, xn, 'an item in list%s' % description, level=level+1)
+                self.generate_data_type_validation(data_type.data_type, xn, 'an item in list%s' % description,
+                                                   level=level + 1)
 
         elif is_map_type(data_type):
             xn = 'x' if level == 0 else 'x%d' % level
@@ -4150,7 +4263,8 @@ class JavaCodeGenerationInstance(object):
             with w.block('for (%s %s : %s.values())', map_item_type, xn, value_name):
                 with w.block('if (%s == null)', xn):
                     w.out('throw new IllegalArgumentException("An item in map%s is null");', description)
-                self.generate_data_type_validation(data_type.value_data_type, xn, 'an item in map%s' % description, level=level+1)
+                self.generate_data_type_validation(data_type.value_data_type, xn, 'an item in map%s' % description,
+                                                   level=level + 1)
 
         elif is_numeric_type(data_type):
             if data_type.min_value is not None:
@@ -4223,7 +4337,7 @@ class JavaCodeGenerationInstance(object):
         w = self.w
         j = self.j
 
-        assert not j.is_enum(data_type), "enum types don't require equals() methods"
+        assert not is_enum(data_type), "enum types don't require equals() methods"
 
         if is_struct_type(data_type):
             fields = [j.param_name(f) for f in data_type.fields]
@@ -4256,7 +4370,8 @@ class JavaCodeGenerationInstance(object):
         elif not is_nullable_type(field.data_type):
             return '(this.%(f)s == other.%(f)s) || (this.%(f)s.equals(other.%(f)s))' % dict(f=name)
         else:
-            return '(this.%(f)s == other.%(f)s) || (this.%(f)s != null && this.%(f)s.equals(other.%(f)s))' % dict(f=name)
+            return '(this.%(f)s == other.%(f)s) || (this.%(f)s != null && this.%(f)s.equals(other.%(f)s))' % dict(
+                f=name)
 
     def generate_equals(self, data_type):
         assert isinstance(data_type, DataType), repr(data_type)
@@ -4273,7 +4388,7 @@ class JavaCodeGenerationInstance(object):
         w = self.w
         j = self.j
 
-        assert not j.is_enum(data_type), "enum types don't require equals() methods"
+        assert not is_enum(data_type), "enum types don't require equals() methods"
 
         w.out('')
         w.out('@Override')
@@ -4330,8 +4445,6 @@ class JavaCodeGenerationInstance(object):
                         w.out(';')
             with w.block('else'):
                 w.out('return false;')
-
-
 
 
 # TODO: Add all Java reserved words.
@@ -4391,7 +4504,6 @@ _RESERVED_KEYWORDS = {
     'while',
 }
 
-
 _TYPE_MAP_UNBOXED = {
     'UInt64': 'long',
     'Int64': 'long',
@@ -4407,7 +4519,6 @@ _TYPE_MAP_UNBOXED = {
     'List': 'java.util.List',
     'Map': 'java.util.Map',
 }
-
 
 _TYPE_MAP_BOXED = {
     'UInt64': 'Long',
